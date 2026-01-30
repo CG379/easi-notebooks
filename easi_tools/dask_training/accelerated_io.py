@@ -1,7 +1,7 @@
 # accelerated_io.py
 
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import cupy as cp
@@ -21,7 +21,7 @@ from nvidia.dali.plugin.pytorch import DALIGenericIterator
 @dataclass(frozen=True)
 class GeoBatchSpec:
     x_key: str = "features"
-    y_key: Optional[str] = "labels"      # None for inference/SSL
+    y_key: Optional[str] = "labels" # None for inference/SSL
     # Optional: enforce patching at read time if the stored samples are larger
     patch_hw: Optional[Tuple[int, int]] = (224, 224)
 
@@ -103,10 +103,11 @@ class IcechunkDaliIterator:
         repo = ic.Repository.open(storage)
         session = repo.readonly_session(snapshot_id=snapshot_id) if snapshot_id else repo.readonly_session(branch=branch)
 
-        with zarr.config.enable_gpu():
-            root = zarr.open_group(store=session.store, mode="r")
-            self.x_arr = root[spec.x_key]
-            self.y_arr = root[spec.y_key]
+        # use without with as seen in docs
+        zarr.config.enable_gpu()
+        root = zarr.open_group(store=session.store, mode="r")
+        self.x_arr = root[spec.x_key]
+        self.y_arr = root[spec.y_key]
 
         n = self.x_arr.shape[0]
         self.indices = np.arange(n) if indices is None else np.array(indices)
@@ -116,8 +117,7 @@ class IcechunkDaliIterator:
         self._cache_bytes = 0
         self._cache_max_bytes = 2 * 1024**3  # tune as needed
         # default: do not cache CuPy samples, probably not needed with dali
-        self._cache_gpu = False  
-
+        self._cache_gpu = False
 
     def _nbytes(self, x, y):
         xb = int(getattr(x, "nbytes", 0))
@@ -166,35 +166,35 @@ class IcechunkDaliIterator:
     def __next__(self):
         if self.i >= self.n:
             raise StopIteration
-    
+
         start = self.i
         end = min(self.i + self.batch_size, self.n)
         self.i = end
         idxs = self.indices[start:end]
-    
+
         # Fast path: contiguous indices -> one slice read
         if len(idxs) > 0:
             idx0 = int(idxs[0])
             contiguous = np.all(idxs == (idx0 + np.arange(len(idxs))))
         else:
             contiguous = False
-    
+
         if contiguous:
             x_raw_b = self.x_arr[idx0:idx0 + len(idxs)]
             y_raw_b = self.y_arr[idx0:idx0 + len(idxs)]
-    
+
             # Apply adapter per-sample (still Python), but Zarr access becomes a single slice
             x_list, y_list = [], []
             for j in range(len(idxs)):
                 x_np, y_np = self.adapter(x_raw_b[j], y_raw_b[j], meta={"index": int(idxs[j])})
                 x_list.append(x_np)
                 y_list.append(y_np)
-    
+
             xp = _xp(x_list[0])
             x_b = xp.stack(x_list, axis=0)
             y_b = xp.stack(y_list, axis=0)
             return (x_b, y_b)
-    
+
         # Fallback: random indices
         x_list, y_list = [], []
         for idx in idxs:
@@ -202,7 +202,6 @@ class IcechunkDaliIterator:
             x_list.append(x_np)
             y_list.append(y_np)
 
-    
         xp = _xp(x_list[0])
         x_b = xp.stack(x_list, axis=0)
         y_b = xp.stack(y_list, axis=0)
@@ -290,7 +289,7 @@ def make_dali_iterator(
     snapshot_id,
     shuffle,
     threads=8,
-    prefetch_queue_depth=6,
+    prefetch_queue_depth=8,
     spec=None,
     adapter=None,
 ):
@@ -332,7 +331,6 @@ def make_dali_iterator(
         output_map=["inputs", "labels"],
         auto_reset=True,
     )
-
 
 
 def get_num_samples(bucket, repo_prefix, snapshot_id=None, branch="main", region="ap-southeast-2",

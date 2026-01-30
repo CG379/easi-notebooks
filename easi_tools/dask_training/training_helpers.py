@@ -73,25 +73,40 @@ def wrap_model_with_fsdp(model, lr, param_selector=None):
 
 
 
-def train_one_epoch_log(model, optimizer, scheduler, task, dataloader, device, log_every: int = 50, sync_cuda: bool = True):
-
+def train_one_epoch_log(
+    model,
+    optimizer,
+    scheduler,
+    task,
+    dataloader,
+    device,
+    log_every: int = 50,
+    sync_cuda: bool = True,
+):
     import time
+    import torch
+
     model.train()
 
     total_loss = 0.0
     total_metric = 0.0
     num_batches = 0
 
-    # timing accumulators (average over measured steps)
-    t_fetch_total = 0.0
-    t_to_total = 0.0
-    t_step_total = 0.0
+    # Averages over measured steps only
+    t_fetch_total = 0.0          # CPU wall time spent in next(data_iter)
+    t_to_total = 0.0             # CPU wall time spent in to_device (incl any sync)
+    t_step_cpu_total = 0.0       # CPU wall time for step region
+    t_step_gpu_ms_total = 0.0    # GPU elapsed time for step region (CUDA events)
     n_meas = 0
 
     data_iter = iter(dataloader)
 
     while True:
-        # --- fetch timing ---
+        # Ensure previous iteration's GPU work doesn't leak into "fetch" timing.
+        if sync_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        # ---- fetch timing (CPU) ----
         t0 = time.perf_counter()
         try:
             batch = next(data_iter)
@@ -99,33 +114,47 @@ def train_one_epoch_log(model, optimizer, scheduler, task, dataloader, device, l
             break
         t1 = time.perf_counter()
 
-        # Unwrap DALI list-of-dicts
         if isinstance(batch, (list, tuple)):
             batch = batch[0]
 
-        # --- to_device timing ---
-        if sync_cuda and torch.cuda.is_available():
-            torch.cuda.synchronize()
+        # ---- to_device timing (CPU) ----
         t2 = time.perf_counter()
         batch = to_device(batch, device)
         if sync_cuda and torch.cuda.is_available():
             torch.cuda.synchronize()
         t3 = time.perf_counter()
 
-        # --- step timing (forward+backward+optim) ---
+        # ---- step timing (CPU + GPU events) ----
         optimizer.zero_grad(set_to_none=True)
+
+        use_events = torch.cuda.is_available()
+        if use_events:
+            start_ev = torch.cuda.Event(enable_timing=True)
+            end_ev = torch.cuda.Event(enable_timing=True)
+
         if sync_cuda and torch.cuda.is_available():
             torch.cuda.synchronize()
         t4 = time.perf_counter()
+
+        if use_events:
+            start_ev.record()
 
         outputs = model(batch["inputs"])
         loss = task.compute_loss(outputs, batch)
         loss.backward()
         optimizer.step()
 
+        if use_events:
+            end_ev.record()
+
         if sync_cuda and torch.cuda.is_available():
             torch.cuda.synchronize()
         t5 = time.perf_counter()
+
+        if use_events:
+            step_gpu_ms = float(start_ev.elapsed_time(end_ev))
+        else:
+            step_gpu_ms = 0.0
 
         metrics = task.compute_metrics(outputs, batch)
 
@@ -133,11 +162,11 @@ def train_one_epoch_log(model, optimizer, scheduler, task, dataloader, device, l
         total_metric += float(metrics.get("accuracy", 0.0))
         num_batches += 1
 
-        # Only record timings every log_every steps to reduce overhead
         if (num_batches - 1) % log_every == 0:
             t_fetch_total += (t1 - t0)
             t_to_total += (t3 - t2)
-            t_step_total += (t5 - t4)
+            t_step_cpu_total += (t5 - t4)
+            t_step_gpu_ms_total += step_gpu_ms
             n_meas += 1
 
     if num_batches > 0:
@@ -147,15 +176,18 @@ def train_one_epoch_log(model, optimizer, scheduler, task, dataloader, device, l
     if scheduler is not None:
         scheduler.step()
 
+    denom = max(n_meas, 1)
     return {
         "loss": float(total_loss),
         "accuracy": float(total_metric),
-        "t_fetch": t_fetch_total / max(n_meas, 1),
-        "t_to_device": t_to_total / max(n_meas, 1),
-        "t_step": t_step_total / max(n_meas, 1),
+        "t_fetch": float(t_fetch_total / denom),
+        "t_to_device": float(t_to_total / denom),
+        "t_step_cpu": float(t_step_cpu_total / denom),
+        "t_step_gpu_ms": float(t_step_gpu_ms_total / denom),
         "timing_samples": int(n_meas),
         "num_batches": int(num_batches),
     }
+
 
 
 def train_one_epoch(model, optimizer, scheduler, task, dataloader, device):
