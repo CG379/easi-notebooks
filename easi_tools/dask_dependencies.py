@@ -1,4 +1,6 @@
-
+'''
+Work around method for installig dependancies onto the cluster. Better solution would be to put everything on an image.
+'''
 def setup_cluster(client):
     """
     One-stop setup for all cluster dependencies

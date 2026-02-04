@@ -5,8 +5,8 @@ from .core_helpers import (
     make_catalog,
     GridRegionSampler
 )
-from .ice_chunk_writer import STACIceChunkBuilder
-from .zarr_writer import STACZarrBuilder
+from .ice_chunk_writer import STACIceChunkBuilder, verify_icechunk_dataset
+from .zarr_writer import STACZarrBuilder, verify_s3_zarr_dataset
 
 __all__ = [
     'load_config',
@@ -15,4 +15,6 @@ __all__ = [
     'GridRegionSampler',
     'STACIceChunkBuilder',
     'STACZarrBuilder',
+    'verify_s3_zarr_dataset',
+    'verify_icechunk_dataset'
 ]
